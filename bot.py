@@ -25,8 +25,11 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY  = os.environ["ANTHROPIC_KEY"]
 BLAND_KEY      = os.environ["BLAND_KEY"]
 
-claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
+import httpx
+claude = anthropic.Anthropic(
+    api_key=ANTHROPIC_KEY,
+    http_client=httpx.Client()
+)
 # ─── Хранилище состояний пользователей (в памяти) ───────────────────
 # { user_id: { request, phone, hebrew_script, russian_summary, call_id } }
 state: dict = {}
