@@ -1,4 +1,3 @@
-
 """
 Бот для покупок в израильских магазинах.
 Пишешь по-русски — он звонит на иврите.
@@ -27,7 +26,6 @@ state: dict = {}
 
 
 def ask_claude(prompt: str) -> str:
-    """Прямой вызов Anthropic API через requests — без SDK."""
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -36,7 +34,8 @@ def ask_claude(prompt: str) -> str:
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-5",            "max_tokens": 1000,
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1000,
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=30,
@@ -174,7 +173,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "phone_number": phone,
                     "task": s["hebrew_script"],
                     "language": "HEB",
-                    "voice": "nat",
                     "max_duration": 10,
                     "record": True,
                 },
@@ -200,7 +198,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 await ctx.bot.send_message(
                     query.message.chat_id,
-                    f"❌ Ошибка: {data.get('message', str(data))}"
+                    f"❌ Ошибка Bland.ai: {data.get('message', str(data))}"
                 )
 
         except Exception as e:
