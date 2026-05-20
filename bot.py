@@ -1,3 +1,4 @@
+
 """
 Бот для покупок в израильских магазинах.
 Пишешь по-русски — он звонит на иврите.
@@ -35,8 +36,7 @@ def ask_claude(prompt: str) -> str:
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1000,
+            "model": "claude-sonnet-4-5",            "max_tokens": 1000,
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=30,
