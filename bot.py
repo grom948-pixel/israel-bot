@@ -1,6 +1,6 @@
 """
 Бот для покупок в израильских магазинах.
-Пишешь по-русски — он звонит на иврите.
+Пишешь по-русски — он звонит на иврите через Twilio.
 """
 
 import os
@@ -8,6 +8,7 @@ import re
 import json
 import logging
 import requests
+from twilio.rest import Client
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,8 +21,11 @@ log = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY  = os.environ["ANTHROPIC_KEY"]
-BLAND_KEY      = os.environ["BLAND_KEY"]
+TWILIO_SID     = os.environ["TWILIO_SID"]
+TWILIO_TOKEN   = os.environ["TWILIO_TOKEN"]
+TWILIO_PHONE   = os.environ["TWILIO_PHONE"]
 
+twilio = Client(TWILIO_SID, TWILIO_TOKEN)
 state: dict = {}
 
 
@@ -166,79 +170,58 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             elif not phone.startswith("+"):
                 phone = "+" + phone
 
-            resp = requests.post(
-                "https://api.bland.ai/v1/calls",
-                headers={"Authorization": BLAND_KEY, "Content-Type": "application/json"},
-                json={
-                    "phone_number": phone,
-                    "task": s["hebrew_script"],
-                    "language": "HEB",
-                    "max_duration": 10,
-                    "record": True,
-                },
-                timeout=15,
-            )
-            data = resp.json()
+            # TwiML — говорит текст и кладёт трубку
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say language="he-IL">{s['hebrew_script']}</Say>
+</Response>"""
 
-            if data.get("call_id"):
-                state[user_id]["call_id"] = data["call_id"]
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Проверить результат", callback_data="check_status")]
-                ])
-                await ctx.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=(
-                        f"✅ *Звонок начат!*\n"
-                        f"ID: `{data['call_id']}`\n\n"
-                        "Нажми кнопку через 2–3 минуты чтобы узнать результат."
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=keyboard,
-                )
-            else:
-                await ctx.bot.send_message(
-                    query.message.chat_id,
-                    f"❌ Ошибка Bland.ai: {data.get('message', str(data))}"
-                )
+            call = twilio.calls.create(
+                to=phone,
+                from_=TWILIO_PHONE,
+                twiml=twiml,
+            )
+
+            state[user_id]["call_sid"] = call.sid
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Проверить результат", callback_data="check_status")]
+            ])
+            await ctx.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"✅ *Звонок начат!*\n"
+                    f"SID: `{call.sid}`\n\n"
+                    "Нажми кнопку через 1–2 минуты чтобы узнать результат."
+                ),
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
 
         except Exception as e:
             log.error("Ошибка звонка: %s", e)
             await ctx.bot.send_message(query.message.chat_id, f"❌ Ошибка звонка: {e}")
 
     elif query.data == "check_status":
-        call_id = state.get(user_id, {}).get("call_id")
-        if not call_id:
+        call_sid = state.get(user_id, {}).get("call_sid")
+        if not call_sid:
             await query.edit_message_text("❌ ID звонка не найден.")
             return
 
         try:
-            resp = requests.get(
-                f"https://api.bland.ai/v1/calls/{call_id}",
-                headers={"Authorization": BLAND_KEY},
-                timeout=10,
-            )
-            data = resp.json()
+            call = twilio.calls(call_sid).fetch()
             status_ru = {
                 "completed": "Завершён ✅",
                 "failed":    "Ошибка ❌",
-                "active":    "Идёт... 📞",
+                "in-progress": "Идёт... 📞",
                 "queued":    "В очереди ⏳",
-            }.get(data.get("status"), data.get("status", "?"))
+                "busy":      "Занято 📵",
+                "no-answer": "Не ответили 📵",
+            }.get(call.status, call.status)
 
-            transcript = data.get("concatenated_transcript", "")
-            if not transcript and data.get("transcripts"):
-                transcript = "\n".join(
-                    f"{t.get('user','?')}: {t.get('text','')}"
-                    for t in data["transcripts"]
-                )
+            text = f"📊 *Статус звонка:* {status_ru}\n"
+            text += f"⏱ Длительность: {call.duration} сек."
 
-            text = f"📊 *Статус:* {status_ru}\n"
-            if transcript:
-                text += f"\n📝 *Транскрипт:*\n```\n{transcript[:1400]}\n```"
-            else:
-                text += "\nТранскрипт ещё не готов."
-
-            still_active = data.get("status") in ("active", "queued")
+            still_active = call.status in ("in-progress", "queued", "ringing")
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Обновить", callback_data="check_status")]
             ]) if still_active else None
