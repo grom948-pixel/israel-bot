@@ -175,9 +175,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "confirm":
         s = state.get(uid, {})
+        if not s.get("phone"):
+            await q.edit_message_text("❌ Номер телефона не найден. Начни заново.")
+            return
         await q.edit_message_text("📞 Звоню через Bland.ai на иврите...")
         try:
-            phone = re.sub(r"[\s\-\(\)]","",s["phone"])
+            phone = re.sub(r"[\s\-\(\)]","",s.get("phone",""))
+            if not phone:
+                await ctx.bot.send_message(cid, "❌ Ошибка: нет номера телефона.")
+                return
             if phone.startswith("0"): phone = "+972"+phone[1:]
             elif not phone.startswith("+"): phone = "+"+phone
 
