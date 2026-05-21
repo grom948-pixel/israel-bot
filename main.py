@@ -41,6 +41,16 @@ def translate_task(task):
 
 def make_bland_call(phone, task_script, chat_id):
     """Звонит через Bland.ai используя зашифрованный Twilio ключ."""
+    payload = {
+        "phone_number": phone,
+        "task": task_script,
+        "language": "heb",
+        "max_duration": 8,
+        "record": True,
+        "answered_by_enabled": False,
+        "webhook": f"https://worker-production-ad12.up.railway.app/bland/webhook?chat_id={chat_id}",
+    }
+    log.info(f"Bland payload: {payload}")
     resp = requests.post(
         "https://api.bland.ai/v1/calls",
         headers={
@@ -48,18 +58,10 @@ def make_bland_call(phone, task_script, chat_id):
             "encrypted_key": BLAND_ENCRYPTED_KEY,
             "Content-Type": "application/json",
         },
-        json={
-            "phone_number": phone,
-            "from": TWILIO_PHONE,
-            "task": task_script,
-            "language": "HEB",
-            "voice": "nat",
-            "max_duration": 10,
-            "record": True,
-            "webhook": f"https://worker-production-ad12.up.railway.app/bland/webhook?chat_id={chat_id}",
-        },
+        json=payload,
         timeout=15,
     )
+    log.info(f"Bland response: {resp.status_code} {resp.text}")
     return resp.json()
 
 
