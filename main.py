@@ -6,7 +6,7 @@
 import os, re, json, logging, asyncio, requests
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import PlainTextResponse
 import uvicorn
 
@@ -99,10 +99,10 @@ def summarize(task: str, history: list) -> str:
 # ══════════════════════════════════════════════════
 
 @fastapi_app.post("/call/start", response_class=PlainTextResponse)
-async def call_start(
-    CallSid: str = Form(default=""),
-    To: str = Form(default=""),
-):
+async def call_start(request: Request):
+    form = await request.form()
+    CallSid = form.get("CallSid", "")
+    To = form.get("To", "")
     log.info(f"call/start: CallSid={CallSid} To={To}")
 
     # Ищем данные по номеру телефона
@@ -140,10 +140,10 @@ async def call_start(
 
 
 @fastapi_app.post("/call/respond", response_class=PlainTextResponse)
-async def call_respond(
-    sid: str = "",
-    SpeechResult: str = Form(default=""),
-):
+async def call_respond(request: Request):
+    form = await request.form()
+    sid = request.query_params.get("sid", "")
+    SpeechResult = form.get("SpeechResult", "")
     log.info(f"call/respond: sid={sid} speech={SpeechResult[:50] if SpeechResult else '(пусто)'}")
     call_data = calls.get(sid)
     vr = VoiceResponse()
@@ -188,7 +188,8 @@ async def call_respond(
 
 
 @fastapi_app.post("/call/done", response_class=PlainTextResponse)
-async def call_done(sid: str = ""):
+async def call_done(request: Request):
+    sid = request.query_params.get("sid", "")
     call_data = calls.get(sid)
     vr = VoiceResponse()
     vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
