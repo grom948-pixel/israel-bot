@@ -80,7 +80,7 @@ def call_start():
     g = Gather(input="speech", language="he-IL",
                action=f"{SERVER_URL}/call/respond?sid={sid}",
                timeout=6, speech_timeout="auto")
-    g.say(opening, language="he-IL", voice="Polly.Dina")
+    g.say(opening, language="he-IL", voice="woman")
     vr.append(g)
     vr.redirect(f"{SERVER_URL}/call/done?sid={sid}")
     return str(vr), 200, {"Content-Type":"text/xml"}
@@ -94,7 +94,7 @@ def call_respond():
     vr     = VoiceResponse()
 
     if not data or not speech:
-        vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
+        vr.say("תודה רבה, שלום!", language="he-IL", voice="woman")
         vr.hangup()
         if data: _finish(sid, data)
         return str(vr), 200, {"Content-Type":"text/xml"}
@@ -111,15 +111,15 @@ def call_respond():
     data["history"].append({"role":"assistant","content":clean})
 
     if done or len(data["history"]) > 18:
-        vr.say(clean, language="he-IL", voice="Polly.Dina")
-        vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
+        vr.say(clean, language="he-IL", voice="woman")
+        vr.say("תודה רבה, שלום!", language="he-IL", voice="woman")
         vr.hangup()
         _finish(sid, data)
     else:
         g = Gather(input="speech", language="he-IL",
                    action=f"{SERVER_URL}/call/respond?sid={sid}",
                    timeout=6, speech_timeout="auto")
-        g.say(clean, language="he-IL", voice="Polly.Dina")
+        g.say(clean, language="he-IL", voice="woman")
         vr.append(g)
         vr.redirect(f"{SERVER_URL}/call/done?sid={sid}")
 
@@ -131,7 +131,7 @@ def call_done():
     sid  = freq.args.get("sid","")
     data = calls.get(sid)
     vr   = VoiceResponse()
-    vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
+    vr.say("תודה רבה, שלום!", language="he-IL", voice="woman")
     vr.hangup()
     if data: _finish(sid, data)
     return str(vr), 200, {"Content-Type":"text/xml"}
