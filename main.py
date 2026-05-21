@@ -1,12 +1,12 @@
 """
 Сервер + Telegram бот для покупок в Израиле.
-Агент ведёт живой диалог на иврите.
+Агент ведёт живой диалог на иврите через Twilio + Claude.
 """
 
 import os, re, json, logging, asyncio, requests
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Form
 from fastapi.responses import PlainTextResponse
 import uvicorn
 
@@ -24,13 +24,15 @@ ANTHROPIC_KEY  = os.environ["ANTHROPIC_KEY"]
 TWILIO_SID     = os.environ["TWILIO_SID"]
 TWILIO_TOKEN   = os.environ["TWILIO_TOKEN"]
 TWILIO_PHONE   = os.environ["TWILIO_PHONE"]
-SERVER_URL     = os.environ["SERVER_URL"]
+SERVER_URL     = os.environ["SERVER_URL"].rstrip("/")
 
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 fastapi_app = FastAPI()
 
-calls: dict = {}
-state: dict = {}
+# Хранилище: используем номер телефона как ключ (до получения call_sid)
+calls: dict = {}          # call_sid -> data
+pending: dict = {}        # phone -> data (до звонка)
+state: dict = {}          # telegram user_id -> state
 tg_app: Application = None
 
 
@@ -41,7 +43,7 @@ tg_app: Application = None
 def ask_claude(messages: list, system: str = "") -> str:
     body = {
         "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 500,
+        "max_tokens": 400,
         "messages": messages,
     }
     if system:
@@ -54,7 +56,7 @@ def ask_claude(messages: list, system: str = "") -> str:
             "content-type": "application/json",
         },
         json=body,
-        timeout=30,
+        timeout=25,
     )
     resp.raise_for_status()
     return resp.json()["content"][0]["text"]
@@ -62,28 +64,33 @@ def ask_claude(messages: list, system: str = "") -> str:
 
 def translate_task(task: str) -> dict:
     prompt = (
-        f"Ты агент для покупок в Израиле. Задача: \"{task}\"\n\n"
-        "Создай первую фразу звонка на иврите и резюме по-русски.\n"
-        "JSON без markdown: {\"opening\": \"שלום...\", \"summary\": \"Агент позвонит и...\"}"
+        f"Ты агент для покупок в Израиле. Задача клиента: \"{task}\"\n\n"
+        "Создай первую фразу звонка на иврите (представься и объясни цель) "
+        "и краткое резюме по-русски.\n"
+        "Ответь ТОЛЬКО JSON без markdown:\n"
+        "{\"opening\": \"שלום...\", \"summary\": \"Агент позвонит и...\"}"
     )
     raw = ask_claude([{"role": "user", "content": prompt}])
     raw = raw.replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
 
 
-def get_next_response(task: str, history: list) -> str:
+def get_next_reply(task: str, history: list) -> str:
     system = (
-        f"Ты телефонный агент в Израиле. Задача: {task}\n"
-        "Говори ТОЛЬКО на иврите. Короткие фразы (1-2 предложения).\n"
-        "Торгуйся, уточняй детали, будь вежлив но настойчив.\n"
-        "Когда задача выполнена — добавь слово КОНЕЦ в конце ответа."
+        f"Ты телефонный агент в Израиле. Твоя задача: {task}\n"
+        "ВАЖНО: говори ТОЛЬКО на иврите. Максимум 2 предложения.\n"
+        "Торгуйся, уточняй, будь вежлив но настойчив.\n"
+        "Когда задача выполнена или разговор закончен — добавь ##КОНЕЦ## в конце."
     )
     return ask_claude(history, system)
 
 
-def summarize_call(task: str, history: list) -> str:
-    convo = "\n".join([f"{m['role']}: {m['content']}" for m in history])
-    prompt = f"Задача была: {task}\n\nРазговор:\n{convo}\n\nНапиши резюме по-русски: что удалось узнать/договориться?"
+def summarize(task: str, history: list) -> str:
+    convo = "\n".join(f"{m['role']}: {m['content']}" for m in history)
+    prompt = (
+        f"Задача была: {task}\n\nРазговор:\n{convo}\n\n"
+        "Напиши резюме по-русски: что узнали / о чём договорились / что купили?"
+    )
     return ask_claude([{"role": "user", "content": prompt}])
 
 
@@ -92,11 +99,31 @@ def summarize_call(task: str, history: list) -> str:
 # ══════════════════════════════════════════════════
 
 @fastapi_app.post("/call/start", response_class=PlainTextResponse)
-async def call_start(CallSid: str = Form(default="")):
-    call_data = calls.get(CallSid, {})
-    opening = call_data.get("opening", "שלום, אני מתקשר.")
-    if CallSid in calls:
-        calls[CallSid]["history"].append({"role": "assistant", "content": opening})
+async def call_start(
+    CallSid: str = Form(default=""),
+    To: str = Form(default=""),
+):
+    log.info(f"call/start: CallSid={CallSid} To={To}")
+
+    # Ищем данные по номеру телефона
+    call_data = None
+    for phone_key, data in list(pending.items()):
+        if To and To.replace(" ", "") in phone_key.replace(" ", ""):
+            call_data = data
+            pending.pop(phone_key, None)
+            break
+
+    if not call_data and pending:
+        # Берём последний pending если не нашли по номеру
+        phone_key = list(pending.keys())[-1]
+        call_data = pending.pop(phone_key)
+
+    if call_data:
+        calls[CallSid] = call_data
+        opening = call_data.get("opening", "שלום, אני מתקשר.")
+        calls[CallSid]["history"] = [{"role": "assistant", "content": opening}]
+    else:
+        opening = "שלום, אני מתקשר בשמך."
 
     vr = VoiceResponse()
     gather = Gather(
@@ -108,75 +135,81 @@ async def call_start(CallSid: str = Form(default="")):
     )
     gather.say(opening, language="he-IL", voice="Polly.Dina")
     vr.append(gather)
-    vr.redirect(f"{SERVER_URL}/call/no-input?sid={CallSid}")
+    vr.redirect(f"{SERVER_URL}/call/done?sid={CallSid}")
     return str(vr)
 
 
 @fastapi_app.post("/call/respond", response_class=PlainTextResponse)
-async def call_respond(sid: str = "", SpeechResult: str = Form(default="")):
+async def call_respond(
+    sid: str = "",
+    SpeechResult: str = Form(default=""),
+):
+    log.info(f"call/respond: sid={sid} speech={SpeechResult[:50] if SpeechResult else '(пусто)'}")
     call_data = calls.get(sid)
-    if not call_data:
-        vr = VoiceResponse()
-        vr.say("תודה, שלום.", language="he-IL", voice="Polly.Dina")
-        vr.hangup()
-        return str(vr)
-
     vr = VoiceResponse()
 
-    if SpeechResult:
-        call_data["history"].append({"role": "user", "content": SpeechResult})
-        next_reply = get_next_response(call_data["task"], call_data["history"])
-        finished = "КОНЕЦ" in next_reply
-        clean = next_reply.replace("КОНЕЦ", "").strip()
-        call_data["history"].append({"role": "assistant", "content": clean})
-
-        if finished or len(call_data["history"]) > 20:
-            vr.say(clean, language="he-IL", voice="Polly.Dina")
-            vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
-            vr.hangup()
-            asyncio.create_task(finish_call(sid, call_data))
-        else:
-            gather = Gather(
-                input="speech",
-                language="he-IL",
-                action=f"{SERVER_URL}/call/respond?sid={sid}",
-                timeout=6,
-                speech_timeout="auto",
-            )
-            gather.say(clean, language="he-IL", voice="Polly.Dina")
-            vr.append(gather)
-            vr.redirect(f"{SERVER_URL}/call/no-input?sid={sid}")
-    else:
+    if not call_data or not SpeechResult:
         vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
         vr.hangup()
-        asyncio.create_task(finish_call(sid, call_data))
+        if call_data:
+            asyncio.create_task(send_summary(sid, call_data))
+        return str(vr)
+
+    call_data["history"].append({"role": "user", "content": SpeechResult})
+
+    try:
+        reply = get_next_reply(call_data["task"], call_data["history"])
+    except Exception as e:
+        log.error(f"Claude error: {e}")
+        reply = "סליחה, לא הבנתי. תודה, שלום! ##КОНЕЦ##"
+
+    finished = "##КОНЕЦ##" in reply
+    clean = reply.replace("##КОНЕЦ##", "").strip()
+    call_data["history"].append({"role": "assistant", "content": clean})
+
+    if finished or len(call_data["history"]) > 18:
+        vr.say(clean, language="he-IL", voice="Polly.Dina")
+        vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
+        vr.hangup()
+        asyncio.create_task(send_summary(sid, call_data))
+    else:
+        gather = Gather(
+            input="speech",
+            language="he-IL",
+            action=f"{SERVER_URL}/call/respond?sid={sid}",
+            timeout=6,
+            speech_timeout="auto",
+        )
+        gather.say(clean, language="he-IL", voice="Polly.Dina")
+        vr.append(gather)
+        vr.redirect(f"{SERVER_URL}/call/done?sid={sid}")
 
     return str(vr)
 
 
-@fastapi_app.post("/call/no-input", response_class=PlainTextResponse)
-async def call_no_input(sid: str = ""):
+@fastapi_app.post("/call/done", response_class=PlainTextResponse)
+async def call_done(sid: str = ""):
     call_data = calls.get(sid)
     vr = VoiceResponse()
     vr.say("תודה רבה, שלום!", language="he-IL", voice="Polly.Dina")
     vr.hangup()
     if call_data:
-        asyncio.create_task(finish_call(sid, call_data))
+        asyncio.create_task(send_summary(sid, call_data))
     return str(vr)
 
 
-async def finish_call(sid: str, call_data: dict):
+async def send_summary(sid: str, call_data: dict):
     try:
-        summary = summarize_call(call_data["task"], call_data["history"])
+        summary = summarize(call_data["task"], call_data["history"])
         if tg_app:
             await tg_app.bot.send_message(
                 chat_id=call_data["chat_id"],
-                text=f"✅ *Звонок завершён!*\n\n📋 *Итог:*\n{summary}",
+                text=f"✅ *Звонок завершён!*\n\n📋 *Итог по-русски:*\n{summary}",
                 parse_mode="Markdown",
             )
         calls.pop(sid, None)
     except Exception as e:
-        log.error("Ошибка завершения: %s", e)
+        log.error(f"send_summary error: {e}")
 
 
 # ══════════════════════════════════════════════════
@@ -186,10 +219,11 @@ async def finish_call(sid: str, call_data: dict):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🇮🇱 Привет! Я веду живые переговоры с израильскими магазинами.\n\n"
-        "Напиши задачу и номер телефона — позвоню и буду торговаться на иврите!\n\n"
+        "Напиши задачу и номер — позвоню и буду торговаться на иврите!\n\n"
         "📌 Примеры:\n"
         "• «Позвони и спроси о собаках у Моше. Тел: 054-664-1812»\n"
-        "• «Узнай цену на iPhone в магазине. Номер: 03-1234567»"
+        "• «Узнай цену на iPhone. Номер: 03-1234567»\n"
+        "• «Закажи пиццу и узнай про скидки. Тел: 050-1234567»"
     )
 
 
@@ -198,9 +232,9 @@ def extract_phone(text: str):
     match = re.search(pattern, text)
     if match:
         phone = match.group().strip()
-        clean = text[:match.start()].strip() + " " + text[match.end():].strip()
-        for word in ["номер", "телефон", "тел", "tel", "phone", ":", "."]:
-            clean = clean.replace(word, " ").strip()
+        clean = (text[:match.start()] + " " + text[match.end():]).strip()
+        for w in ["номер", "телефон", "тел", "tel", "phone", ":", "."]:
+            clean = clean.replace(w, " ")
         clean = re.sub(r"\s+", " ", clean).strip()
         return phone, clean
     return None, text
@@ -214,7 +248,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if state.get(user_id, {}).get("waiting_phone"):
         state[user_id]["waiting_phone"] = False
         state[user_id]["phone"] = text.strip()
-        await start_call_flow(update, user_id, chat_id)
+        await prepare_call(update, user_id, chat_id)
         return
 
     phone, task = extract_phone(text)
@@ -222,9 +256,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Напиши что нужно сделать 🙂")
         return
 
-    state[user_id] = {"task": task, "phone": phone}
+    state[user_id] = {"task": task, "phone": phone, "chat_id": chat_id}
     if phone:
-        await start_call_flow(update, user_id, chat_id)
+        await prepare_call(update, user_id, chat_id)
     else:
         await update.message.reply_text(
             f"📋 Задача: *{task}*\n\n📞 Напиши номер телефона:",
@@ -233,26 +267,26 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         state[user_id]["waiting_phone"] = True
 
 
-async def start_call_flow(update: Update, user_id: int, chat_id: int):
+async def prepare_call(update: Update, user_id: int, chat_id: int):
     s = state[user_id]
     msg = await update.message.reply_text("🔄 Подготавливаю агента...")
     try:
         translated = translate_task(s["task"])
         state[user_id]["opening"] = translated["opening"]
-        state[user_id]["chat_id"] = chat_id
 
-        keyboard = InlineKeyboardMarkup([
+        kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Позвонить и вести диалог!", callback_data="call_confirm")],
             [InlineKeyboardButton("✏️ Изменить задачу", callback_data="call_change")],
         ])
         await msg.edit_text(
             f"📋 *Задача агента:*\n{translated['summary']}\n\n"
-            f"🇮🇱 *Первая фраза:*\n{translated['opening']}\n\n"
+            f"🇮🇱 *Первая фраза на иврите:*\n{translated['opening']}\n\n"
             f"📞 Номер: `{s['phone']}`",
             parse_mode="Markdown",
-            reply_markup=keyboard,
+            reply_markup=kb,
         )
     except Exception as e:
+        log.error(f"prepare_call error: {e}")
         await msg.edit_text(f"❌ Ошибка: {e}")
 
 
@@ -264,7 +298,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "call_confirm":
         s = state.get(user_id, {})
-        await query.edit_message_text("📞 Звоню... агент начнёт диалог!")
+        await query.edit_message_text("📞 Звоню... агент начнёт диалог на иврите!")
         try:
             phone = re.sub(r"[\s\-\(\)]", "", s["phone"])
             if phone.startswith("0"):
@@ -272,25 +306,30 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             elif not phone.startswith("+"):
                 phone = "+" + phone
 
+            # Сохраняем данные в pending ДО звонка
+            pending[phone] = {
+                "task": s["task"],
+                "opening": s.get("opening", "שלום"),
+                "history": [],
+                "chat_id": chat_id,
+            }
+
             call = twilio_client.calls.create(
                 to=phone,
                 from_=TWILIO_PHONE,
                 url=f"{SERVER_URL}/call/start",
                 method="POST",
             )
-            calls[call.sid] = {
-                "task": s["task"],
-                "opening": s.get("opening", "שלום"),
-                "history": [],
-                "chat_id": chat_id,
-            }
+            log.info(f"Call created: {call.sid}")
+
             await ctx.bot.send_message(
                 chat_id=chat_id,
-                text="📞 *Звонок начат!*\nАгент ведёт диалог на иврите.\nКогда закончится — пришлю итог по-русски 🇷🇺",
+                text="📞 *Звонок идёт!*\nАгент ведёт диалог на иврите.\nКогда закончится — пришлю итог по-русски 🇷🇺",
                 parse_mode="Markdown",
             )
         except Exception as e:
-            await ctx.bot.send_message(chat_id, f"❌ Ошибка: {e}")
+            log.error(f"call error: {e}")
+            await ctx.bot.send_message(chat_id, f"❌ Ошибка звонка: {e}")
 
     elif query.data == "call_change":
         state.pop(user_id, None)
@@ -298,26 +337,20 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════
-#  ЗАПУСК — FastAPI + Telegram в одном event loop
+#  ЗАПУСК
 # ══════════════════════════════════════════════════
 
-async def run_telegram():
+@fastapi_app.on_event("startup")
+async def startup():
     global tg_app
     tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(CallbackQueryHandler(handle_callback))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     await tg_app.initialize()
     await tg_app.start()
     await tg_app.updater.start_polling(drop_pending_updates=True)
-    log.info("Telegram бот запущен ✅")
-
-
-@fastapi_app.on_event("startup")
-async def startup():
-    asyncio.create_task(run_telegram())
-    log.info("FastAPI запущен ✅")
+    log.info("✅ Telegram бот запущен")
 
 
 @fastapi_app.on_event("shutdown")
