@@ -82,7 +82,7 @@ def call_start():
     vr = VoiceResponse()
     g = Gather(input="speech", language=LANG,
                action=f"{SERVER_URL}/call/respond?sid={sid}",
-               timeout=6, speech_timeout="auto")
+               timeout=10, speech_timeout="auto")
     g.say(opening, language=LANG, voice=VOICE)
     vr.append(g)
     vr.redirect(f"{SERVER_URL}/call/done?sid={sid}")
@@ -121,7 +121,7 @@ def call_respond():
     else:
         g = Gather(input="speech", language=LANG,
                    action=f"{SERVER_URL}/call/respond?sid={sid}",
-                   timeout=6, speech_timeout="auto")
+                   timeout=10, speech_timeout="auto")
         g.say(clean, language=LANG, voice=VOICE)
         vr.append(g)
         vr.redirect(f"{SERVER_URL}/call/done?sid={sid}")
