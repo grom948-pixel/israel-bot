@@ -80,7 +80,7 @@ def call_start():
         opening = "שלום, אני מתקשר."
 
     vr = VoiceResponse()
-    g = Gather(input="speech", language=LANG, hints="שלום,כן,לא,מה,איך,למה,מתי,כמה,אני,אתה",
+    g = Gather(input="speech", language=LANG, hints="שלום,כן,לא,מה,איך,למה,מתי,כמה,אני,אתה", speechModel="phone_call", enhanced=True,
                action=f"{SERVER_URL}/call/respond?sid={sid}",
                timeout=10, speech_timeout="auto")
     g.say(opening, language=LANG, voice=VOICE)
@@ -119,7 +119,7 @@ def call_respond():
         vr.hangup()
         _finish(sid, data)
     else:
-        g = Gather(input="speech", language=LANG, hints="שלום,כן,לא,מה,איך,למה,מתי,כמה,אני,אתה",
+        g = Gather(input="speech", language=LANG, hints="שלום,כן,לא,מה,איך,למה,מתי,כמה,אני,אתה", speechModel="phone_call", enhanced=True,
                    action=f"{SERVER_URL}/call/respond?sid={sid}",
                    timeout=10, speech_timeout="auto")
         g.say(clean, language=LANG, voice=VOICE)
